@@ -76,7 +76,7 @@ def sanitize_responses_payload(body: dict) -> dict:
     return clean
 
 
-def _response_from_sse_data(data: str) -> dict | None:
+def _event_from_sse_data(data: str) -> dict | None:
     if data.strip() == "[DONE]":
         return None
 
@@ -91,25 +91,50 @@ def _response_from_sse_data(data: str) -> dict | None:
     if event.get("type") == "error":
         raise HTTPException(status_code=502, detail="OpenAI Responses request failed.")
 
-    if event.get("type") not in TERMINAL_RESPONSE_EVENTS:
-        return None
-
-    response = event.get("response")
-    if not isinstance(response, dict):
-        raise HTTPException(status_code=502, detail="OpenAI Responses stream ended with an invalid response.")
-    return response
+    return event
 
 
 async def read_non_streaming_response(upstream: httpx.Response) -> dict:
-    """Collect the terminal Response object when the caller requested JSON."""
+    """Collect a completed Response object when the caller requested JSON."""
     data_lines: list[str] = []
+    output_items: dict[int, dict] = {}
 
     def parse_pending() -> dict | None:
         if not data_lines:
             return None
         data = "\n".join(data_lines)
         data_lines.clear()
-        return _response_from_sse_data(data)
+        return _event_from_sse_data(data)
+
+    def consume_event(event: dict | None) -> dict | None:
+        if event is None:
+            return None
+
+        event_type = event.get("type")
+        if event_type == "response.output_item.done":
+            output_index = event.get("output_index")
+            item = event.get("item")
+            if isinstance(output_index, int) and output_index >= 0 and isinstance(item, dict):
+                output_items[output_index] = item
+
+        if event_type not in TERMINAL_RESPONSE_EVENTS:
+            return None
+
+        response = event.get("response")
+        if not isinstance(response, dict):
+            raise HTTPException(status_code=502, detail="OpenAI Responses stream ended with an invalid response.")
+        if event_type != "response.completed" or response.get("status") != "completed":
+            raise HTTPException(status_code=502, detail="OpenAI Responses request did not complete successfully.")
+
+        output = response.get("output")
+        if not isinstance(output, list) or not output:
+            # SIWC can emit completed output items in the SSE stream while its
+            # terminal response object has an empty output array.
+            recovered_output = [output_items[index] for index in sorted(output_items)]
+            if not recovered_output:
+                raise HTTPException(status_code=502, detail="OpenAI Responses stream completed without output.")
+            response["output"] = recovered_output
+        return response
 
     async for line in upstream.aiter_lines():
         if line.startswith(":"):
@@ -118,11 +143,11 @@ async def read_non_streaming_response(upstream: httpx.Response) -> dict:
             data_lines.append(line[5:].lstrip())
             continue
         if not line:
-            response = parse_pending()
+            response = consume_event(parse_pending())
             if response is not None:
                 return response
 
-    response = parse_pending()
+    response = consume_event(parse_pending())
     if response is not None:
         return response
     raise HTTPException(status_code=502, detail="OpenAI Responses stream ended before completion.")
@@ -164,7 +189,7 @@ def create_app(
 
     application = FastAPI(
         title="Open WebUI ChatGPT SIWC",
-        version="0.1.1",
+        version="0.1.2",
         lifespan=lifespan,
     )
 
