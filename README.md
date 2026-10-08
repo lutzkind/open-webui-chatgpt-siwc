@@ -90,7 +90,7 @@ The OAuth callback uses `http://127.0.0.1:<port>/auth/callback` on the computer 
 ## Responses API compatibility
 
 - The adapter queries OpenAI for the connected account's model catalog and maps visible entries to OpenAI-compatible model records. Model availability is account-specific and can change.
-- Responses requests are streamed, and `store` is forced to `false`.
+- The adapter uses upstream Responses SSE with `store: false`; streaming callers receive SSE, while non-streaming callers receive the completed Responses object as JSON.
 - The adapter maps Open WebUI's legacy `reasoning_effort` field to Responses API `reasoning.effort` and preserves the native reasoning object where supported.
 - Native Open WebUI function tools are passed through in the Responses request. Tool execution and approvals remain controlled by Open WebUI.
 - Open WebUI system-role input items are converted to the Responses-compatible developer role. Fields outside the current SIWC plan surface are removed.

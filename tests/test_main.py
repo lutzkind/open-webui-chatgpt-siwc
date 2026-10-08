@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import ClassVar
 
 import pytest
@@ -42,13 +43,24 @@ def settings(tmp_path):
 
 
 class FakeUpstream:
-    def __init__(self, status_code=200, body=b"data: {\"type\":\"response.completed\"}\n\n"):
+    def __init__(
+        self,
+        status_code=200,
+        body=(
+            b'event: response.completed\n'
+            b'data: {"type":"response.completed","response":{"id":"resp-test","object":"response","status":"completed","output":[]}}\n\n'
+        ),
+    ):
         self.status_code = status_code
         self.body = body
         self.closed = False
 
     async def aiter_bytes(self):
         yield self.body
+
+    async def aiter_lines(self):
+        for line in self.body.splitlines():
+            yield line.decode()
 
     async def aread(self):
         return self.body
@@ -197,7 +209,7 @@ def test_models_request_authenticates_and_normalizes_catalog(monkeypatch, tmp_pa
     assert kwargs["headers"]["Authorization"] == "Bearer chatgpt-access-token"
 
 
-def test_responses_stream_is_forwarded_with_sanitized_body(monkeypatch, tmp_path):
+def test_responses_stream_request_is_forwarded_with_sanitized_body(monkeypatch, tmp_path):
     FakeAsyncClient.sent = []
     FakeAsyncClient.send_response = FakeUpstream()
     monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
@@ -211,12 +223,13 @@ def test_responses_stream_is_forwarded_with_sanitized_body(monkeypatch, tmp_path
                 "tools": [{"type": "function", "name": "lookup"}],
                 "reasoning_effort": "high",
                 "store": True,
-                "stream": False,
+                "stream": True,
                 "temperature": 0,
                 "metadata": {"private": "drop"},
             },
         )
     assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
     assert "response.completed" in response.text
     _, request, options = FakeAsyncClient.sent[0]
     assert request["url"] == "https://api.openai.com/v1/responses"
@@ -229,6 +242,68 @@ def test_responses_stream_is_forwarded_with_sanitized_body(monkeypatch, tmp_path
     assert "temperature" not in request["json"]
     assert "metadata" not in request["json"]
     assert options["stream"] is True
+
+
+def test_responses_non_stream_request_returns_completed_response_object(monkeypatch, tmp_path):
+    FakeAsyncClient.sent = []
+    completed_response = {
+        "id": "resp-test",
+        "object": "response",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "review JSON"}],
+            }
+        ],
+    }
+    event = {"type": "response.completed", "response": completed_response}
+    FakeAsyncClient.send_response = FakeUpstream(
+        body=(
+            b'event: response.created\n'
+            b'data: {"type":"response.created","response":{"id":"resp-test"}}\n\n'
+            + b"event: response.completed\n"
+            + b"data: "
+            + json.dumps(event).encode()
+            + b"\n\n"
+        )
+    )
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    with TestClient(create_app(settings(tmp_path), StubStore())) as client:
+        response = client.post(
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            json={
+                "model": "available-model",
+                "input": [{"role": "user", "content": "hello"}],
+                "stream": False,
+            },
+        )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == completed_response
+    _, request, options = FakeAsyncClient.sent[0]
+    assert request["json"]["stream"] is True
+    assert options["stream"] is True
+    assert FakeAsyncClient.send_response.closed
+
+
+def test_responses_non_stream_request_fails_if_stream_ends_before_completion(monkeypatch, tmp_path):
+    FakeAsyncClient.sent = []
+    FakeAsyncClient.send_response = FakeUpstream(
+        body=b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp-test"}}\n\n'
+    )
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    with TestClient(create_app(settings(tmp_path), StubStore())) as client:
+        response = client.post(
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            json={"input": [{"role": "user", "content": "hello"}], "stream": False},
+        )
+    assert response.status_code == 502
+    assert response.json() == {"detail": "OpenAI Responses stream ended before completion."}
+    assert FakeAsyncClient.send_response.closed
 
 
 def test_responses_preserves_upstream_error_status(monkeypatch, tmp_path):
