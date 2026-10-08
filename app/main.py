@@ -32,6 +32,13 @@ UNSUPPORTED_PLAN_FIELDS = {
     "user",
 }
 
+TERMINAL_RESPONSE_EVENTS = {
+    "response.cancelled",
+    "response.completed",
+    "response.failed",
+    "response.incomplete",
+}
+
 
 def _require_adapter_auth(authorization: str | None, settings: Settings) -> None:
     expected = f"Bearer {settings.ADAPTER_API_KEY.get_secret_value()}"
@@ -67,6 +74,58 @@ def sanitize_responses_payload(body: dict) -> dict:
         for item in clean["input"]
     ]
     return clean
+
+
+def _response_from_sse_data(data: str) -> dict | None:
+    if data.strip() == "[DONE]":
+        return None
+
+    try:
+        event = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=502, detail="Invalid event from OpenAI Responses API.") from exc
+
+    if not isinstance(event, dict):
+        raise HTTPException(status_code=502, detail="Invalid event from OpenAI Responses API.")
+
+    if event.get("type") == "error":
+        raise HTTPException(status_code=502, detail="OpenAI Responses request failed.")
+
+    if event.get("type") not in TERMINAL_RESPONSE_EVENTS:
+        return None
+
+    response = event.get("response")
+    if not isinstance(response, dict):
+        raise HTTPException(status_code=502, detail="OpenAI Responses stream ended with an invalid response.")
+    return response
+
+
+async def read_non_streaming_response(upstream: httpx.Response) -> dict:
+    """Collect the terminal Response object when the caller requested JSON."""
+    data_lines: list[str] = []
+
+    def parse_pending() -> dict | None:
+        if not data_lines:
+            return None
+        data = "\n".join(data_lines)
+        data_lines.clear()
+        return _response_from_sse_data(data)
+
+    async for line in upstream.aiter_lines():
+        if line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+            continue
+        if not line:
+            response = parse_pending()
+            if response is not None:
+                return response
+
+    response = parse_pending()
+    if response is not None:
+        return response
+    raise HTTPException(status_code=502, detail="OpenAI Responses stream ended before completion.")
 
 
 def normalize_models(payload: dict) -> dict:
@@ -105,7 +164,7 @@ def create_app(
 
     application = FastAPI(
         title="Open WebUI ChatGPT SIWC",
-        version="0.1.0",
+        version="0.1.1",
         lifespan=lifespan,
     )
 
@@ -162,6 +221,7 @@ def create_app(
             incoming = await request.json()
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise HTTPException(status_code=400, detail="Request body must be valid JSON.") from exc
+        stream_requested = isinstance(incoming, dict) and incoming.get("stream") is True
         body = sanitize_responses_payload(incoming)
         if not credential_store.is_configured():
             raise HTTPException(status_code=503, detail="Sign in with ChatGPT to connect this adapter.")
@@ -216,7 +276,20 @@ def create_app(
                 await upstream.aclose()
                 await client.aclose()
 
-        return StreamingResponse(stream(), status_code=upstream.status_code, media_type="text/event-stream")
+        # SIWC is requested as an upstream SSE stream; restore the caller's
+        # requested response mode at this OpenAI-compatible boundary.
+        if stream_requested:
+            return StreamingResponse(stream(), status_code=upstream.status_code, media_type="text/event-stream")
+
+        try:
+            try:
+                response = await read_non_streaming_response(upstream)
+            except httpx.HTTPError as exc:
+                raise HTTPException(status_code=502, detail="OpenAI Responses request failed.") from exc
+            return JSONResponse(status_code=upstream.status_code, content=response)
+        finally:
+            await upstream.aclose()
+            await client.aclose()
 
     application.include_router(connect_router(models))
     return application
