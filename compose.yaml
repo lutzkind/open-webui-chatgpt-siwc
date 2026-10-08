@@ -1,0 +1,21 @@
+services:
+  siwc-adapter:
+    build: .
+    image: open-webui-chatgpt-siwc:${IMAGE_TAG:-local}
+    env_file:
+      - .env
+    expose:
+      - "8080"
+    volumes:
+      - siwc-data:${DATA_DIR:-/data}
+    networks:
+      - open-webui
+    restart: unless-stopped
+
+networks:
+  open-webui:
+    name: ${OPEN_WEBUI_DOCKER_NETWORK:?Set OPEN_WEBUI_DOCKER_NETWORK in .env}
+    external: true
+
+volumes:
+  siwc-data:

@@ -1,0 +1,7 @@
+{
+  "name": "open-webui-chatgpt-siwc-browser-tests",
+  "private": true,
+  "devDependencies": {
+    "playwright": "1.64.0"
+  }
+}

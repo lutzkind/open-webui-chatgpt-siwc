@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  adapter:
+    name: Adapter, browser and container checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install Python dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Python compile and lint
+        run: |
+          python -m compileall -q app tests tools
+          ruff check app tests tools
+      - name: Python tests
+        run: python -m pytest -q
+      - name: Companion syntax and synthetic pairing
+        run: |
+          npm --prefix tools ci --ignore-scripts --no-audit --no-fund
+          node --check tools/authorize.mjs
+          node --check tools/web_connect.mjs
+          node --check tools/test_companion_flow.mjs
+          node --test tools/test_oauth_flow.test.mjs
+          node tools/test_companion_flow.mjs
+      - name: Browser test dependencies
+        run: |
+          npm ci --prefix tests/browser --ignore-scripts --no-audit --no-fund
+          npx --prefix tests/browser playwright install --with-deps chromium
+      - name: Browser connection flow
+        run: python tools/run_browser_test.py
+      - name: Public-tree security scan
+        run: python tools/security_scan.py
+      - name: Whitespace check
+        run: git diff --check
+      - name: Docker build
+        run: docker build --pull --build-arg VCS_REF=${GITHUB_SHA} -t open-webui-chatgpt-siwc:ci .
+
+  macos-companion:
+    name: macOS companion build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Build universal macOS app
+        run: python tools/package_companion.py --output dist/Connect-ChatGPT-macOS.zip
+      - name: Upload companion artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Connect-ChatGPT-macOS
+          path: dist/Connect-ChatGPT-macOS.zip
+          if-no-files-found: error
+          retention-days: 14
