@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Connect ChatGPT · Open WebUI</title>
+    <link rel="stylesheet" href="/siwc/connect/connect.css">
+    <script defer src="/siwc/connect/connect.js"></script>
+  </head>
+  <body>
+    <main>
+      <a href="/">← Open WebUI</a>
+      <h1>Connect ChatGPT</h1>
+      <p id="state" role="status" aria-live="polite">Checking connection…</p>
+      <p id="message" role="status" aria-live="polite" aria-atomic="true"></p>
+      <section>
+        <h2>Two separate sign-ins</h2>
+        <p><strong>Sign into Open WebUI</strong> to use your self-hosted chat service and administer this shared provider.</p>
+        <p><strong>Use a ChatGPT subscription for inference</strong> by authorizing this adapter with an eligible ChatGPT account.</p>
+      </section>
+      <button id="connect" hidden>Continue with ChatGPT</button>
+      <section id="install" hidden>
+        <h2>Local macOS companion</h2>
+        <p>The companion completes OAuth on the Mac running your browser. The adapter never receives the browser callback.</p>
+        <a id="download" href="/siwc/download">Download Connect ChatGPT for macOS</a>
+        <p id="distribution">This build is not notarized by Apple. Review its source and checksum before opening it.</p>
+      </section>
+      <section id="verification" hidden>
+        <h2>Connection check</h2>
+        <ul id="checks"></ul>
+      </section>
+      <a id="back" href="/" hidden>Return to chat</a>
+    </main>
+  </body>
+</html>

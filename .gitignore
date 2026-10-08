@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+tools/node_modules/
+tests/browser/node_modules/
+dist/
+build/
+*.zip
+*.enc
+.DS_Store

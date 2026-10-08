@@ -1,0 +1,92 @@
+:root {
+  color-scheme: light dark;
+  font: 1.0625rem/1.5 system-ui, sans-serif;
+}
+
+body {
+  box-sizing: border-box;
+  display: grid;
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0;
+  padding: clamp(1rem, 5vw, 2rem);
+  background: light-dark(#fafafa, #171717);
+  color: light-dark(#171717, #fafafa);
+}
+
+main {
+  box-sizing: border-box;
+  width: min(100%, 38rem);
+  margin: auto;
+  padding: clamp(1.25rem, 5vw, 2rem);
+  border: 1px solid light-dark(#767676, #858585);
+  border-radius: 1rem;
+}
+
+h1 {
+  font-size: clamp(1.75rem, 1.4rem + 1.5vw, 2.25rem);
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+a {
+  color: light-dark(#075aaa, #8ecaff);
+}
+
+button {
+  border: 1px solid light-dark(#171717, #fafafa);
+  border-radius: 0.5rem;
+  padding: 0.8rem 1.3rem;
+  background: light-dark(#171717, #fafafa);
+  color: light-dark(#fafafa, #171717);
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+#state {
+  font-weight: 700;
+}
+
+section {
+  margin-top: 2rem;
+}
+
+#message {
+  min-height: 1.5em;
+}
+
+a:focus-visible,
+button:focus-visible {
+  outline: 3px solid light-dark(#075aaa, #8ecaff);
+  outline-offset: 4px;
+}
+
+@media (forced-colors: active) {
+  main {
+    border-color: CanvasText;
+  }
+
+  a {
+    color: LinkText;
+  }
+
+  button {
+    border-color: ButtonText;
+    background: ButtonFace;
+    color: ButtonText;
+  }
+
+  a:focus-visible,
+  button:focus-visible {
+    outline-color: Highlight;
+  }
+}
+
+[hidden] {
+  display: none !important;
+}

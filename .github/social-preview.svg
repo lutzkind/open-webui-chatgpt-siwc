@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">Open WebUI plus Sign in with ChatGPT</title>
+  <desc id="desc">ChatGPT subscription via SIWC and the Responses API. Independent community adapter.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101a2a"/>
+      <stop offset="1" stop-color="#1c3046"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#79d4c7"/>
+      <stop offset="1" stop-color="#8ecbff"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" rx="28" fill="url(#background)"/>
+  <circle cx="1090" cy="120" r="210" fill="#70b6ca" opacity=".08"/>
+  <circle cx="160" cy="590" r="230" fill="#8ecbff" opacity=".06"/>
+  <rect x="86" y="84" width="10" height="472" rx="5" fill="url(#accent)"/>
+  <text x="136" y="244" fill="#f4f8fb" font-family="Arial, sans-serif" font-size="56" font-weight="700">Open WebUI</text>
+  <text x="136" y="338" fill="#79d4c7" font-family="Arial, sans-serif" font-size="58" font-weight="400">+</text>
+  <text x="196" y="338" fill="#f4f8fb" font-family="Arial, sans-serif" font-size="56" font-weight="700">Sign in with ChatGPT</text>
+  <text x="136" y="422" fill="#bfd0df" font-family="Arial, sans-serif" font-size="30">ChatGPT subscription via SIWC + Responses API</text>
+  <text x="136" y="524" fill="#8fa5b9" font-family="Arial, sans-serif" font-size="20" letter-spacing="1">INDEPENDENT COMMUNITY ADAPTER</text>
+  <rect x="1080" y="493" width="112" height="46" rx="23" fill="#ffffff" opacity=".09"/>
+  <text x="1136" y="523" text-anchor="middle" fill="#d8e4ee" font-family="Arial, sans-serif" font-size="18" font-weight="700">SIWC</text>
+</svg>

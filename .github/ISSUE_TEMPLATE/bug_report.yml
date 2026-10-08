@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a reproducible problem using synthetic or redacted details.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, account identifiers, private hostnames, or production logs.
+  - type: input
+    id: version
+    attributes:
+      label: Adapter version or commit
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Use synthetic data and redact infrastructure details.
+    validations:
+      required: true
