@@ -8,7 +8,7 @@ WORKDIR /app
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.source="https://github.com/lutzkind/open-webui-chatgpt-siwc" \
     org.opencontainers.image.revision="${VCS_REF}" \
-    org.opencontainers.image.version="0.1.1"
+    org.opencontainers.image.version="0.1.2"
 
 COPY requirements.txt .
 RUN apt-get update \

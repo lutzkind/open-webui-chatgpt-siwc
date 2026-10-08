@@ -289,6 +289,79 @@ def test_responses_non_stream_request_returns_completed_response_object(monkeypa
     assert FakeAsyncClient.send_response.closed
 
 
+def test_non_stream_request_recovers_output_items_omitted_by_completed_event(monkeypatch, tmp_path):
+    FakeAsyncClient.sent = []
+    output_item = {
+        "id": "msg-test",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "review JSON"}],
+    }
+    completed_response = {
+        "id": "resp-test",
+        "object": "response",
+        "status": "completed",
+        "output": [],
+    }
+    FakeAsyncClient.send_response = FakeUpstream(
+        body=(
+            b"event: response.output_item.done\n"
+            + b"data: "
+            + json.dumps(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": output_item,
+                }
+            ).encode()
+            + b"\n\n"
+            + b"event: response.completed\n"
+            + b"data: "
+            + json.dumps({"type": "response.completed", "response": completed_response}).encode()
+            + b"\n\n"
+        )
+    )
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    with TestClient(create_app(settings(tmp_path), StubStore())) as client:
+        response = client.post(
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            json={
+                "model": "available-model",
+                "input": [{"role": "user", "content": "hello"}],
+                "stream": False,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["output"] == [output_item]
+
+
+def test_non_stream_request_rejects_completed_event_without_output(monkeypatch, tmp_path):
+    FakeAsyncClient.sent = []
+    FakeAsyncClient.send_response = FakeUpstream(
+        body=(
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"resp-test","object":"response","status":"completed","output":[]}}\n\n'
+        )
+    )
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    with TestClient(create_app(settings(tmp_path), StubStore())) as client:
+        response = client.post(
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            json={
+                "model": "available-model",
+                "input": [{"role": "user", "content": "hello"}],
+                "stream": False,
+            },
+        )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "OpenAI Responses stream completed without output."
+
+
 def test_responses_non_stream_request_fails_if_stream_ends_before_completion(monkeypatch, tmp_path):
     FakeAsyncClient.sent = []
     FakeAsyncClient.send_response = FakeUpstream(
