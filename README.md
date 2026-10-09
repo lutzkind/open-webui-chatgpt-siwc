@@ -96,6 +96,10 @@ The OAuth callback uses `http://127.0.0.1:<port>/auth/callback` on the computer 
 - Open WebUI system-role input items are converted to the Responses-compatible developer role. Fields outside the current SIWC plan surface are removed.
 - ChatGPT subscription access is not the same product surface as the OpenAI API. Some API parameters and features are not available through SIWC. See OpenAI's [models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference) and [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations) documentation.
 
+### Optional Open WebUI reasoning control
+
+The repository includes a stock Open WebUI Filter Function at [`integrations/open-webui/functions/siwc_think.py`](integrations/open-webui/functions/siwc_think.py). It adds a toggleable **Think** control and a per-user effort setting for supported SIWC models. Turning Think off leaves the request's existing reasoning parameter untouched; turning it on forwards the selected effort without changing the model or prompt. The native Advanced Parameters control remains available. See the integration [installation and model-support notes](integrations/open-webui/README.md).
+
 ## Credential storage and security
 
 The adapter encrypts the SIWC credential record with Fernet and atomically stores it in `DATA_DIR/credentials.enc` with restrictive file permissions. The encryption key is supplied separately through `SIWC_CREDENTIAL_KEY`. Refresh-token rotation is persisted back to the encrypted file. The local companion does not retain a plaintext credential file.
@@ -133,8 +137,8 @@ Requirements: Python 3.12+, Node.js 24+, and Docker. Install and run the synthet
 python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements-dev.txt
-python -m compileall -q app tests tools
-ruff check app tests tools
+python -m compileall -q app integrations tests tools
+ruff check app integrations tests tools --per-file-ignores "integrations/open-webui/functions/siwc_think.py:I001"
 python -m pytest -q
 npm --prefix tools ci
 node --check tools/authorize.mjs
