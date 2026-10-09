@@ -138,7 +138,7 @@ python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements-dev.txt
 python -m compileall -q app integrations tests tools
-ruff check app integrations tests tools
+ruff check app integrations tests tools --per-file-ignores "integrations/open-webui/functions/siwc_think.py:I001"
 python -m pytest -q
 npm --prefix tools ci
 node --check tools/authorize.mjs

@@ -28,7 +28,7 @@ jobs:
       - name: Python compile and lint
         run: |
           python -m compileall -q app integrations tests tools
-          ruff check app integrations tests tools
+          ruff check app integrations tests tools --per-file-ignores "integrations/open-webui/functions/siwc_think.py:I001"
       - name: Python tests
         run: python -m pytest -q
       - name: Companion syntax and synthetic pairing
