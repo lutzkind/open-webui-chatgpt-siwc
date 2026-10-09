@@ -3,7 +3,6 @@ from runpy import run_path
 
 import pytest
 
-
 FUNCTION_PATH = (
     Path(__file__).parents[1]
     / "integrations"
