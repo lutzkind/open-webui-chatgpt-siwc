@@ -96,9 +96,11 @@ The OAuth callback uses `http://127.0.0.1:<port>/auth/callback` on the computer 
 - Open WebUI system-role input items are converted to the Responses-compatible developer role. Fields outside the current SIWC plan surface are removed.
 - ChatGPT subscription access is not the same product surface as the OpenAI API. Some API parameters and features are not available through SIWC. See OpenAI's [models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference) and [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations) documentation.
 
-### Optional Open WebUI reasoning control
+### Open WebUI reasoning control
 
-The repository includes a stock Open WebUI Filter Function at [`integrations/open-webui/functions/siwc_think.py`](integrations/open-webui/functions/siwc_think.py). It adds a toggleable **Think** control and a per-user effort setting for supported SIWC models. Turning Think off leaves the request's existing reasoning parameter untouched; turning it on forwards the selected effort without changing the model or prompt. The native Advanced Parameters control remains available. See the integration [installation and model-support notes](integrations/open-webui/README.md).
+Open WebUI v0.12.0 and newer provide the canonical reasoning selector as native **Model Controls**: a per-model control (for example a "Thinking" menu) whose options set the model's `reasoning_effort`. Configure one option per live-supported effort level on each SIWC model; users pick a level from the controls menu next to the model selector, and the choice is remembered per model. The adapter continues to translate Open WebUI's flat `reasoning_effort` field to the Responses API `reasoning.effort` object, so this normalization is required and must not be removed.
+
+The earlier stock Open WebUI Filter Function at [`integrations/open-webui/functions/siwc_think.py`](integrations/open-webui/functions/siwc_think.py) is **retired** and superseded by the native Model Controls. It remains in the repository only for older Open WebUI versions (pre-v0.12.0) that do not have Model Controls; do not run it alongside native Model Controls. See the integration [notes](integrations/open-webui/README.md).
 
 ## Credential storage and security
 
