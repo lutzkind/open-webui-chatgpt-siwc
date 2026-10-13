@@ -93,7 +93,6 @@ The OAuth callback uses `http://127.0.0.1:<port>/auth/callback` on the computer 
 - The adapter uses upstream Responses SSE with `store: false`; streaming callers receive SSE, while non-streaming callers receive the completed Responses object as JSON.
 - The adapter maps Open WebUI's legacy `reasoning_effort` field to Responses API `reasoning.effort` and preserves the native reasoning object where supported.
 - Native Open WebUI function tools are passed through in the Responses request. Tool execution and approvals remain controlled by Open WebUI.
-- Open WebUI background memory reviews are identified by the reviewer system prompt and receive the instance's business-only memory policy as one additional developer item; all other requests are forwarded unchanged.
 - Open WebUI system-role input items are converted to the Responses-compatible developer role. Fields outside the current SIWC plan surface are removed.
 - ChatGPT subscription access is not the same product surface as the OpenAI API. Some API parameters and features are not available through SIWC. See OpenAI's [models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference) and [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations) documentation.
 
