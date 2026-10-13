@@ -1,8 +1,10 @@
 # Open WebUI integration
 
+> **Status: RETIRED (2026-10-13).** Open WebUI v0.12.0 and newer provide native **Model Controls** as the canonical reasoning selector (a per-model control whose options set `reasoning_effort`). The `siwc_think` Filter Function below is superseded and must not run alongside native Model Controls. It is retained in this repository only for older Open WebUI versions (pre-v0.12.0) that lack Model Controls. The adapter continues to translate Open WebUI's flat `reasoning_effort` field to the Responses API `reasoning.effort` object; that normalization remains required.
+
 This directory contains an optional stock Open WebUI Filter Function for selecting Responses API reasoning effort. The adapter remains responsible for translating Open WebUI's flat `reasoning_effort` field to the Responses API `reasoning.effort` object.
 
-## Install
+## Install (legacy Open WebUI versions only)
 
 1. In Open WebUI, open **Admin Panel → Functions** and create a Filter Function.
 2. Copy the source from [`functions/siwc_think.py`](functions/siwc_think.py), save it, and enable it for the SIWC models.
