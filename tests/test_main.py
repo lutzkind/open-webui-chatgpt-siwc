@@ -160,6 +160,121 @@ def test_system_input_role_becomes_developer_and_non_array_is_rejected():
         sanitize_responses_payload({"input": "hello"})
 
 
+def test_memory_review_policy_is_appended_once_for_reviewer_calls():
+    result = sanitize_responses_payload(
+        {
+            "model": "gpt-6.1-sol",
+            "instructions": "You are Open WebUI's private memory reviewer. Return only valid JSON.",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Review the completed conversation turn"}],
+                }
+            ],
+        }
+    )
+    assert len(result["input"]) == 2
+    review_item, policy_item = result["input"]
+    assert review_item["content"][0]["text"] == "Review the completed conversation turn"
+    assert policy_item["role"] == "developer"
+    assert policy_item["type"] == "message"
+    policy_text = policy_item["content"][0]["text"]
+    assert "additional policy for this Open WebUI instance" in policy_text
+    assert "Do NOT add memories that are primarily personal life" in policy_text
+
+
+def test_memory_review_policy_is_idempotent():
+    body = {
+        "instructions": "You are Open WebUI's private memory reviewer. Return only valid JSON.",
+        "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Review"}]},
+        ],
+    }
+    first = sanitize_responses_payload(dict(body, input=[dict(body["input"][0])]))
+    second = sanitize_responses_payload(first)
+    assert len(second["input"]) == 2
+    assert sum(
+        1
+        for item in second["input"]
+        if isinstance(item.get("content"), list)
+        and "additional policy for this Open WebUI instance" in item["content"][0]["text"]
+    ) == 1
+
+
+def test_memory_review_policy_skips_when_already_present_in_input():
+    result = sanitize_responses_payload(
+        {
+            "instructions": "You are Open WebUI's private memory reviewer. Return only valid JSON.",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Review"}]},
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "IMPORTANT — additional policy for this Open WebUI instance that overrides the general rules above:",
+                        }
+                    ],
+                },
+            ],
+        }
+    )
+    assert len(result["input"]) == 2
+
+
+def test_memory_review_policy_not_applied_to_normal_requests():
+    result = sanitize_responses_payload(
+        {
+            "instructions": "You are a helpful assistant.",
+            "input": [{"role": "user", "content": "hello"}],
+        }
+    )
+    assert result["input"] == [{"role": "user", "content": "hello"}]
+    assert result["instructions"] == "You are a helpful assistant."
+
+    plain = sanitize_responses_payload({"input": [{"role": "user", "content": "hello"}]})
+    assert plain["input"] == [{"role": "user", "content": "hello"}]
+
+
+def test_memory_review_policy_ignores_reviewer_text_in_user_messages():
+    result = sanitize_responses_payload(
+        {
+            "input": [
+                {
+                    "role": "user",
+                    "content": "Open WebUI's private memory reviewer is mentioned here as plain chat text.",
+                }
+            ]
+        }
+    )
+    assert len(result["input"]) == 1
+
+
+def test_memory_review_policy_detects_reviewer_prompt_in_developer_item():
+    result = sanitize_responses_payload(
+        {
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "You are Open WebUI's private memory reviewer. Return only valid JSON.",
+                        }
+                    ],
+                },
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Review"}]},
+            ]
+        }
+    )
+    assert len(result["input"]) == 3
+    assert result["input"][-1]["role"] == "developer"
+    assert "additional policy for this Open WebUI instance" in result["input"][-1]["content"][0]["text"]
+
+
 def test_model_catalog_exposes_only_explicitly_listed_models():
     result = normalize_models(
         {
