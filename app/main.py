@@ -39,71 +39,6 @@ TERMINAL_RESPONSE_EVENTS = {
     "response.incomplete",
 }
 
-# Open WebUI's background memory review runs through its internal provider path
-# (utils/memory.py -> utils/chat.generate_chat_completion), which bypasses Open
-# WebUI filter functions. This adapter is the canonical request path for every
-# SIWC model call, so the business-only memory policy is enforced here: review
-# calls are identified by Open WebUI's reviewer system prompt, and the policy is
-# appended once as an additional developer input item. Normal chats and other
-# internal tasks never match the marker and are forwarded unchanged.
-MEMORY_REVIEW_INSTRUCTIONS_MARKER = "Open WebUI's private memory reviewer"
-MEMORY_POLICY_MARKER = "additional policy for this Open WebUI instance that overrides"
-MEMORY_REVIEW_POLICY = """IMPORTANT — additional policy for this Open WebUI instance that overrides the general rules above:
-This instance is a business orchestrator. Its memory must contain only business, project, technical, operational, or work-style context.
-- Do NOT add memories that are primarily personal life — even when the user explicitly asks to remember them. This includes: personal identity or citizenship; personal residence or location; travel plans; relationships or family; health, diet, or medical details; hobbies or interests; personal driving licences; personal relocation or lifestyle plans (visa, immigration, van-life); personal banking or personal finance; and private-life projects.
-- When a turn mixes business and personal content, extract only the business-relevant part and ignore the personal part.
-- If an existing memory listed above is purely personal under this policy, you MUST include a remove operation for it: {"action":"remove","id":"<its id>"}. Never propose remove operations for business, technical, or work-preference memories.
-"""
-
-
-def _item_text(item: dict) -> str:
-    content = item.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and isinstance(part.get("text"), str)
-        )
-    return ""
-
-
-def apply_memory_review_policy(payload: dict) -> dict:
-    """Append the business-only memory policy to Open WebUI background memory reviews.
-
-    The policy is appended exactly once (idempotent) as a developer input item after
-    the review prompt, which gives it instruction authority over the general review
-    rules. Requests that do not carry Open WebUI's reviewer prompt are unchanged.
-    """
-    instructions = payload.get("instructions")
-    has_reviewer = isinstance(instructions, str) and MEMORY_REVIEW_INSTRUCTIONS_MARKER in instructions
-    input_items = payload.get("input")
-    if not has_reviewer and isinstance(input_items, list):
-        has_reviewer = any(
-            isinstance(item, dict)
-            and item.get("role") in ("system", "developer")
-            and MEMORY_REVIEW_INSTRUCTIONS_MARKER in _item_text(item)
-            for item in input_items
-        )
-    if not has_reviewer:
-        return payload
-    if isinstance(instructions, str) and MEMORY_POLICY_MARKER in instructions:
-        return payload
-    if not isinstance(input_items, list):
-        return payload
-    for item in input_items:
-        if isinstance(item, dict) and MEMORY_POLICY_MARKER in _item_text(item):
-            return payload
-    input_items.append(
-        {
-            "type": "message",
-            "role": "developer",
-            "content": [{"type": "input_text", "text": MEMORY_REVIEW_POLICY}],
-        }
-    )
-    return payload
-
 
 def _require_adapter_auth(authorization: str | None, settings: Settings) -> None:
     expected = f"Bearer {settings.ADAPTER_API_KEY.get_secret_value()}"
@@ -138,7 +73,6 @@ def sanitize_responses_payload(body: dict) -> dict:
         {**item, "role": "developer"} if isinstance(item, dict) and item.get("role") == "system" else item
         for item in clean["input"]
     ]
-    apply_memory_review_policy(clean)
     return clean
 
 
