@@ -29,17 +29,19 @@ class StubStore:
         return self.token
 
 
-def settings(tmp_path):
-    return Settings(
-        ADAPTER_API_KEY=API_KEY,
-        SIWC_CREDENTIAL_KEY=Fernet.generate_key().decode(),
-        SIWC_HOST_ID=HOST_ID,
-        CONNECT_ADMIN_EMAILS="admin@example.test",
-        OPEN_WEBUI_PUBLIC_ORIGIN=ORIGIN,
-        CONNECT_PUBLIC_URL=ORIGIN + "/siwc/connect",
-        ADAPTER_INTERNAL_URL="http://siwc-adapter:8080/v1",
-        DATA_DIR=tmp_path,
-    )
+def settings(tmp_path, **overrides):
+    values = {
+        "ADAPTER_API_KEY": API_KEY,
+        "SIWC_CREDENTIAL_KEY": Fernet.generate_key().decode(),
+        "SIWC_HOST_ID": HOST_ID,
+        "CONNECT_ADMIN_EMAILS": "admin@example.test",
+        "OPEN_WEBUI_PUBLIC_ORIGIN": ORIGIN,
+        "CONNECT_PUBLIC_URL": ORIGIN + "/siwc/connect",
+        "ADAPTER_INTERNAL_URL": "http://siwc-adapter:8080/v1",
+        "DATA_DIR": tmp_path,
+    }
+    values.update(overrides)
+    return Settings(**values)
 
 
 class FakeUpstream:
@@ -397,6 +399,151 @@ def test_responses_non_stream_request_fails_if_stream_ends_before_completion(mon
     assert response.status_code == 502
     assert response.json() == {"detail": "OpenAI Responses stream ended before completion."}
     assert FakeAsyncClient.send_response.closed
+
+
+def test_documented_siwc_unsupported_fields_are_removed():
+    """Pin the SIWC request contract: every field the preview documentation
+    lists as unsupported must be stripped before the upstream call."""
+    unsupported = [
+        "background",
+        "conversation",
+        "max_output_tokens",
+        "max_tool_calls",
+        "metadata",
+        "moderation",
+        "multi_agent",
+        "previous_response_id",
+        "prompt",
+        "prompt_cache_retention",
+        "safety_identifier",
+        "temperature",
+        "top_logprobs",
+        "top_p",
+        "truncation",
+        "user",
+    ]
+    payload = {"input": [{"role": "user", "content": "hello"}]}
+    payload.update({key: "value" for key in unsupported})
+    result = sanitize_responses_payload(payload)
+    for key in unsupported:
+        assert key not in result
+    assert result["store"] is False
+    assert result["stream"] is True
+
+
+def test_cache_routing_key_is_generated_deterministically_for_a_conversation(monkeypatch, tmp_path):
+    FakeAsyncClient.sent = []
+    FakeAsyncClient.send_response = FakeUpstream()
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    conversation = [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "audit"}]},
+    ]
+    with TestClient(create_app(settings(tmp_path), StubStore())) as client:
+        for extra in ([], [{"type": "function_call_output", "call_id": "c1", "output": "ok"}]):
+            response = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {API_KEY}"},
+                json={
+                    "model": "gpt-6.1-sol",
+                    "instructions": "stable instructions",
+                    "input": conversation + extra,
+                    "stream": True,
+                },
+            )
+            assert response.status_code == 200
+    first_key = FakeAsyncClient.sent[0][1]["json"]["prompt_cache_key"]
+    second_key = FakeAsyncClient.sent[1][1]["json"]["prompt_cache_key"]
+    assert first_key == second_key
+    assert len(first_key) == 32
+    assert first_key.isalnum()
+
+
+def test_cache_routing_key_differs_across_conversations_and_is_preserved_when_supplied(monkeypatch, tmp_path):
+    FakeAsyncClient.sent = []
+    FakeAsyncClient.send_response = FakeUpstream()
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    with TestClient(create_app(settings(tmp_path), StubStore())) as client:
+        for body in (
+            {"model": "gpt-6.1-sol", "input": [{"role": "user", "content": "conversation a"}], "stream": True},
+            {"model": "gpt-6.1-sol", "input": [{"role": "user", "content": "conversation b"}], "stream": True},
+            {
+                "model": "gpt-6.1-sol",
+                "input": [{"role": "user", "content": "conversation a"}],
+                "prompt_cache_key": "client-supplied-key",
+                "stream": True,
+            },
+        ):
+            response = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {API_KEY}"},
+                json=body,
+            )
+            assert response.status_code == 200
+    key_a = FakeAsyncClient.sent[0][1]["json"]["prompt_cache_key"]
+    key_b = FakeAsyncClient.sent[1][1]["json"]["prompt_cache_key"]
+    assert key_a != key_b
+    assert FakeAsyncClient.sent[2][1]["json"]["prompt_cache_key"] == "client-supplied-key"
+
+
+def test_cache_routing_key_can_be_disabled_for_unsupported_accounts(monkeypatch, tmp_path):
+    FakeAsyncClient.sent = []
+    FakeAsyncClient.send_response = FakeUpstream()
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    with TestClient(
+        create_app(settings(tmp_path, CACHE_ROUTING_KEY=False), StubStore())
+    ) as client:
+        response = client.post(
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            json={"model": "gpt-6.1-sol", "input": [{"role": "user", "content": "hello"}], "stream": True},
+        )
+        assert response.status_code == 200
+    assert "prompt_cache_key" not in FakeAsyncClient.sent[0][1]["json"]
+
+
+def test_one_inbound_request_maps_to_exactly_one_upstream_request(monkeypatch, tmp_path):
+    FakeAsyncClient.sent = []
+    completed_response = {
+        "id": "resp-test",
+        "object": "response",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "ok"}],
+            }
+        ],
+    }
+    FakeAsyncClient.send_response = FakeUpstream(
+        body=(
+            b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp-test"}}\n\n'
+            + b"event: response.completed\ndata: "
+            + json.dumps({"type": "response.completed", "response": completed_response}).encode()
+            + b"\n\n"
+        )
+    )
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    with TestClient(create_app(settings(tmp_path), StubStore())) as client:
+        for stream_requested in (True, False):
+            response = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {API_KEY}"},
+                json={
+                    "model": "gpt-6.1-sol",
+                    "input": [{"role": "user", "content": "hello"}],
+                    "stream": stream_requested,
+                },
+            )
+            assert response.status_code == 200
+    sends = [entry for entry in FakeAsyncClient.sent if entry[0] == "SEND"]
+    gets = [entry for entry in FakeAsyncClient.sent if entry[0] == "GET"]
+    assert len(sends) == 2
+    assert gets == []
+    for _, request, options in sends:
+        assert options["stream"] is True
+        assert request["json"]["stream"] is True
+        assert request["json"]["store"] is False
 
 
 def test_responses_preserves_upstream_error_status(monkeypatch, tmp_path):

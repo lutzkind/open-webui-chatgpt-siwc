@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     )
     TOKEN_REFRESH_SKEW_SECONDS: int = 300
     REQUEST_TIMEOUT_SECONDS: float = 120.0
+    # Structured content-free request telemetry (see app/telemetry.py).
+    REQUEST_TELEMETRY: bool = True
+    # Inject a stable `prompt_cache_key` when the caller did not provide one,
+    # so tool-loop continuations of one conversation can reuse its cached
+    # prompt prefix. Set to false if the SIWC resource rejects the field.
+    CACHE_ROUTING_KEY: bool = True
 
     @field_validator("ADAPTER_API_KEY")
     @classmethod
