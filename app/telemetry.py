@@ -204,21 +204,39 @@ def fingerprint_request(req_id: str, body: dict) -> RequestFingerprint:
     )
 
 
+def _anchor_item(body: dict) -> Any:
+    """The conversation anchor: the first user-role item.
+
+    Open WebUI (and other clients) may lead the input with a developer or
+    system item — the same block for every conversation of one user and
+    model. Using it as the anchor would collapse all conversations onto one
+    routing key, so prefer the first user message and fall back to the first
+    input item only when no user item exists.
+    """
+    input_items = body.get("input")
+    if not isinstance(input_items, list) or not input_items:
+        return None
+    for item in input_items:
+        if isinstance(item, dict) and item.get("role") == "user":
+            return item
+    return input_items[0]
+
+
 def build_prompt_cache_key(body: dict) -> str | None:
     """Derive a stable routing key for the conversation this request belongs to.
 
     Prompt caching on the Responses API keys on the longest common request
     prefix. A key derived from the *anchor* of the conversation (the model and
-    the first input item) is identical for every tool-loop round of one visible
-    conversation and different across conversations, so the backend can route
-    continuations of the same prefix to the machine that cached it. The key is
-    an opaque digest; no conversation content is readable from it.
+    the first user message) is identical for every tool-loop round of one
+    visible conversation and different across conversations, so the backend
+    can route continuations of the same prefix to the machine that cached it.
+    The key is an opaque digest; no conversation content is readable from it.
     """
-    input_items = body.get("input")
-    if not isinstance(input_items, list) or not input_items:
+    anchor = _anchor_item(body)
+    if anchor is None:
         return None
-    anchor = {"model": body.get("model"), "first_input_item": input_items[0]}
-    return hashlib.sha256(_canonical(anchor).encode("utf-8")).hexdigest()[:CACHE_KEY_HEX_LENGTH]
+    material = {"model": body.get("model"), "anchor": anchor}
+    return hashlib.sha256(_canonical(material).encode("utf-8")).hexdigest()[:CACHE_KEY_HEX_LENGTH]
 
 
 def apply_cache_routing_key(body: dict, enabled: bool) -> tuple[dict, str]:
