@@ -9,13 +9,13 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from .caching import apply_cache_policy
 from .config import Settings, get_settings
 from .connect import router as connect_router
 from .store import CredentialError, CredentialStore
 from .telemetry import (
     RecentRequests,
     RequestTelemetry,
-    apply_cache_routing_key,
     setup_logging,
 )
 
@@ -258,13 +258,14 @@ def create_app(
             raise HTTPException(status_code=400, detail="Request body must be valid JSON.") from exc
         stream_requested = isinstance(incoming, dict) and incoming.get("stream") is True
         body = sanitize_responses_payload(incoming)
-        body, cache_key_source = apply_cache_routing_key(body, settings.CACHE_ROUTING_KEY)
+        body, cache_report = apply_cache_policy(body, settings)
         telemetry = RequestTelemetry(
             settings,
             body,
-            cache_key_source=cache_key_source,
+            cache_key_source=cache_report["routing_key"],
             recent=request.app.state.recent_requests,
         )
+        telemetry.note_cache_breakpoints(cache_report["breakpoints_added"])
         telemetry.note_stream_requested(stream_requested)
         stream_issued = False
         try:

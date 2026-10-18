@@ -77,10 +77,15 @@ class Settings(BaseSettings):
     REQUEST_TIMEOUT_SECONDS: float = 120.0
     # Structured content-free request telemetry (see app/telemetry.py).
     REQUEST_TELEMETRY: bool = True
-    # Inject a stable `prompt_cache_key` when the caller did not provide one,
-    # so tool-loop continuations of one conversation can reuse its cached
-    # prompt prefix. Set to false if the SIWC resource rejects the field.
-    CACHE_ROUTING_KEY: bool = True
+    # Explicit prompt-cache breakpoints (see app/caching.py): mark the stable
+    # head and every tool result so later tool-loop rounds can reuse the
+    # earlier prompt prefix. Disable if a resource rejects the field.
+    CACHE_BREAKPOINTS: bool = False
+    # Inject a conversation-derived `prompt_cache_key` when the caller did not
+    # provide one. OpenAI routes caches automatically on GPT-5.6 and later
+    # (keys are only used for separate cache accounting there), so this is
+    # opt-in for older models.
+    CACHE_ROUTING_KEY: bool = False
 
     @field_validator("ADAPTER_API_KEY")
     @classmethod

@@ -8,6 +8,12 @@ from typing import ClassVar
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
+from app.caching import (
+    apply_cache_breakpoints,
+    apply_cache_policy,
+    apply_cache_routing_key,
+    build_prompt_cache_key,
+)
 from app.config import Settings
 from app.main import create_app
 from app.telemetry import (
@@ -15,8 +21,6 @@ from app.telemetry import (
     RecentRequests,
     RequestTelemetry,
     StreamObserver,
-    apply_cache_routing_key,
-    build_prompt_cache_key,
     fingerprint_request,
     summarize_events,
 )
@@ -320,6 +324,77 @@ def test_prompt_cache_key_falls_back_to_first_item_without_user_role():
     body = {"model": "gpt-6.1-sol", "input": [{"type": "message", "role": "developer", "content": "only item"}]}
     key = build_prompt_cache_key(body)
     assert key is not None and len(key) == 32
+
+
+def test_cache_breakpoints_mark_stable_head_and_tool_results_append_stably():
+    def round_body(extra_tool_items=None):
+        items = [
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "stable rules"}],
+            },
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+        ]
+        if extra_tool_items:
+            items.extend(extra_tool_items)
+        return {"model": "gpt-6.1-sol", "input": items}
+
+    tool_output = lambda marker: [
+        {"type": "function_call", "call_id": f"c_{marker}", "name": "noop", "arguments": "{}"},
+        {
+            "type": "function_call_output",
+            "call_id": f"c_{marker}",
+            "output": [{"type": "input_text", "text": f"result {marker}"}],
+        },
+    ]
+
+    round_one, added_one = apply_cache_breakpoints(round_body([*tool_output("a")]))
+    assert added_one == 2  # developer head + one tool result
+    round_two, added_two = apply_cache_breakpoints(round_body([*tool_output("a"), *tool_output("b")]))
+    # Marks are re-added deterministically on every round (the adapter's
+    # outbound marks never persist in the client's stored history), so the
+    # replayed items plus their marks serialize byte-identically.
+    assert added_two == 3
+    assert json.dumps(round_one["input"][:3], sort_keys=True) == json.dumps(round_two["input"][:3], sort_keys=True)
+
+    # Idempotent: applying twice to the same body adds nothing.
+    _, added_again = apply_cache_breakpoints(round_one)
+    assert added_again == 0
+
+
+def test_cache_breakpoints_skip_string_content_and_leave_content_untouched():
+    body = {
+        "model": "gpt-6.1-sol",
+        "input": [
+            {"type": "message", "role": "developer", "content": "plain string"},
+            {"type": "function_call_output", "call_id": "c1", "output": "plain tool output"},
+            {"type": "function_call_output", "call_id": "c2", "output": [{"type": "input_text", "text": "kept"}]},
+        ],
+    }
+    updated, added = apply_cache_breakpoints(body)
+    assert added == 1  # only the array-form tool output
+    assert updated["input"][0]["content"] == "plain string"
+    assert updated["input"][1]["output"] == "plain tool output"
+    assert updated["input"][2]["output"][0]["text"] == "kept"
+    assert updated["input"][2]["output"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
+
+
+def test_cache_policy_reports_sources(tmp_path):
+    body = {
+        "model": "gpt-6.1-sol",
+        "input": [
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "rules"}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+        ],
+    }
+    _, report = apply_cache_policy(body, settings(tmp_path))
+    assert report == {"routing_key": "disabled", "breakpoints_added": 0}
+
+    updated, report = apply_cache_policy(body, settings(tmp_path, CACHE_ROUTING_KEY=True, CACHE_BREAKPOINTS=True))
+    assert report["routing_key"] == "generated"
+    assert report["breakpoints_added"] == 1
+    assert "prompt_cache_key" in updated
 
 
 def test_apply_cache_routing_key_respects_client_value_and_disable_flag():
