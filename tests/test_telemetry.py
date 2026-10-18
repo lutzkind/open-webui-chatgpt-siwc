@@ -289,6 +289,39 @@ def test_prompt_cache_key_is_stable_across_appends_and_unique_per_conversation()
     assert build_prompt_cache_key({"model": "gpt-6.1-sol", "input": []}) is None
 
 
+def test_prompt_cache_key_anchors_on_first_user_message_not_developer_block():
+    """Open WebUI sends the shared system prompt as the leading developer item;
+    the key must still identify the conversation by its first user message."""
+    developer = {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "shared rules"}]}
+    conversation_a = {
+        "model": "gpt-6.1-sol",
+        "input": [developer, {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "audit a"}]}],
+    }
+    conversation_b = {
+        "model": "gpt-6.1-sol",
+        "input": [developer, {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "audit b"}]}],
+    }
+    continuation_a = {
+        "model": "gpt-6.1-sol",
+        "input": [
+            developer,
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "audit a"}]},
+            {"type": "function_call_output", "call_id": "c1", "output": "tool output"},
+        ],
+    }
+    key_a = build_prompt_cache_key(conversation_a)
+    key_b = build_prompt_cache_key(conversation_b)
+    assert key_a is not None and key_b is not None
+    assert key_a != key_b
+    assert key_a == build_prompt_cache_key(continuation_a)
+
+
+def test_prompt_cache_key_falls_back_to_first_item_without_user_role():
+    body = {"model": "gpt-6.1-sol", "input": [{"type": "message", "role": "developer", "content": "only item"}]}
+    key = build_prompt_cache_key(body)
+    assert key is not None and len(key) == 32
+
+
 def test_apply_cache_routing_key_respects_client_value_and_disable_flag():
     body = {"model": "gpt-6.1-sol", "input": [{"role": "user", "content": "hi"}]}
     updated, source = apply_cache_routing_key(dict(body, prompt_cache_key="mine"), enabled=True)
