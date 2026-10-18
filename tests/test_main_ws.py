@@ -379,3 +379,49 @@ def test_websocket_without_conversation_header_starts_a_new_chain_per_history(tm
 
     assert len(server.frames) == 2
     assert all(frame.get("previous_response_id") is None for frame in server.frames)
+
+
+def test_http_transport_records_the_conversation_lane(tmp_path, monkeypatch):
+    logger, handler, records = capture_telemetry()
+    FakeAsyncClient.sent = []
+    FakeAsyncClient.send_response = FakeUpstream()
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    from app.config import Settings
+
+    try:
+        with TestClient(create_app(Settings(**settings_values(tmp_path)), StubStore())) as client:
+            response = client.post(
+                "/v1/responses",
+                headers={**auth(), **conversation("chat-with-lane")},
+                json={"model": "gpt-6.1-sol", "input": [message_item("hello", "user")], "stream": True},
+            )
+            assert response.status_code == 200
+    finally:
+        logger.removeHandler(handler)
+
+    events = [json.loads(record.getMessage()) for record in records]
+    assert events[0]["transport"]["kind"] == "http"
+    assert events[0]["transport"]["lane"].startswith("h:")
+    assert "chat-with-lane" not in json.dumps(events[0])
+
+
+def test_http_transport_records_a_missing_conversation_lane(tmp_path, monkeypatch):
+    logger, handler, records = capture_telemetry()
+    FakeAsyncClient.sent = []
+    FakeAsyncClient.send_response = FakeUpstream()
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    from app.config import Settings
+
+    try:
+        with TestClient(create_app(Settings(**settings_values(tmp_path)), StubStore())) as client:
+            response = client.post(
+                "/v1/responses",
+                headers=auth(),
+                json={"model": "gpt-6.1-sol", "input": [message_item("hello", "user")], "stream": True},
+            )
+            assert response.status_code == 200
+    finally:
+        logger.removeHandler(handler)
+
+    events = [json.loads(record.getMessage()) for record in records]
+    assert events[0]["transport"] == {"kind": "http", "lane": None}

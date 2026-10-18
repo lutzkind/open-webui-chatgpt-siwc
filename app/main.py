@@ -345,19 +345,29 @@ def create_app(
                 raise HTTPException(status_code=503, detail="Sign in with ChatGPT to connect this adapter.")
 
             session = None
+            conversation_key = None
             if settings.RESPONSES_TRANSPORT == "websocket":
                 transport: WebSocketTransport = request.app.state.ws_transport
                 report: dict = {}
+                conversation_key = transport.conversation_key(request.headers)
                 try:
                     session = await transport.begin(
                         body=body,
-                        conversation_key=transport.conversation_key(request.headers),
+                        conversation_key=conversation_key,
                         fingerprint=telemetry.fingerprint,
                         report=report,
                     )
                 except WsUnavailable as exc:
                     telemetry.note_error("websocket_unavailable")
-                    telemetry.note_transport({"kind": "websocket", "fallback": True, "fallback_reason": str(exc)})
+                    telemetry.note_transport(
+                        {
+                            "kind": "http",
+                            "fallback_from": "websocket",
+                            "lane": conversation_key,
+                            "fallback_reason": str(exc),
+                            "fallback": True,
+                        }
+                    )
                     session = None
                 if session is not None:
                     telemetry.note_transport(session.report)
@@ -377,6 +387,9 @@ def create_app(
                         )
                     response = await collect_websocket_response(session, telemetry)
                     return JSONResponse(status_code=200, content=response)
+            else:
+                conversation_key = request.app.state.ws_transport.conversation_key(request.headers)
+            telemetry.note_transport({"kind": "http", "lane": conversation_key})
 
             try:
                 token = await credential_store.access_token()
