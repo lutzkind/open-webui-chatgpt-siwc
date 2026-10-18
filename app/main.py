@@ -12,6 +12,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .config import Settings, get_settings
 from .connect import router as connect_router
 from .store import CredentialError, CredentialStore
+from .telemetry import (
+    RecentRequests,
+    RequestTelemetry,
+    apply_cache_routing_key,
+    setup_logging,
+)
 
 UNSUPPORTED_PLAN_FIELDS = {
     "background",
@@ -94,7 +100,7 @@ def _event_from_sse_data(data: str) -> dict | None:
     return event
 
 
-async def read_non_streaming_response(upstream: httpx.Response) -> dict:
+async def read_non_streaming_response(upstream: httpx.Response, telemetry: RequestTelemetry | None = None) -> dict:
     """Collect a completed Response object when the caller requested JSON."""
     data_lines: list[str] = []
     output_items: dict[int, dict] = {}
@@ -137,6 +143,8 @@ async def read_non_streaming_response(upstream: httpx.Response) -> dict:
         return response
 
     async for line in upstream.aiter_lines():
+        if telemetry is not None:
+            telemetry.observe_line(line)
         if line.startswith(":"):
             continue
         if line.startswith("data:"):
@@ -185,6 +193,8 @@ def create_app(
         credential_store = store_override or CredentialStore(runtime_settings)
         application.state.runtime_settings = runtime_settings
         application.state.credential_store = credential_store
+        application.state.recent_requests = RecentRequests()
+        setup_logging()
         yield
 
     application = FastAPI(
@@ -248,73 +258,95 @@ def create_app(
             raise HTTPException(status_code=400, detail="Request body must be valid JSON.") from exc
         stream_requested = isinstance(incoming, dict) and incoming.get("stream") is True
         body = sanitize_responses_payload(incoming)
-        if not credential_store.is_configured():
-            raise HTTPException(status_code=503, detail="Sign in with ChatGPT to connect this adapter.")
-        try:
-            token = await credential_store.access_token()
-        except CredentialError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-        client = httpx.AsyncClient(
-            timeout=httpx.Timeout(settings.REQUEST_TIMEOUT_SECONDS, connect=20)
+        body, cache_key_source = apply_cache_routing_key(body, settings.CACHE_ROUTING_KEY)
+        telemetry = RequestTelemetry(
+            settings,
+            body,
+            cache_key_source=cache_key_source,
+            recent=request.app.state.recent_requests,
         )
-        upstream_request = client.build_request(
-            "POST",
-            f"{settings.OPENAI_API_BASE_URL}/responses",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-            },
-            json=body,
-        )
+        telemetry.note_stream_requested(stream_requested)
+        stream_issued = False
         try:
-            upstream = await client.send(upstream_request, stream=True)
-        except httpx.HTTPError:
-            await client.aclose()
-            raise HTTPException(status_code=502, detail="OpenAI Responses request failed.")
-
-        if upstream.status_code >= 400:
-            status_code = upstream.status_code
+            if not credential_store.is_configured():
+                raise HTTPException(status_code=503, detail="Sign in with ChatGPT to connect this adapter.")
             try:
-                content = await upstream.aread()
+                token = await credential_store.access_token()
+            except CredentialError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+            client = httpx.AsyncClient(
+                timeout=httpx.Timeout(settings.REQUEST_TIMEOUT_SECONDS, connect=20)
+            )
+            upstream_request = client.build_request(
+                "POST",
+                f"{settings.OPENAI_API_BASE_URL}/responses",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                json=body,
+            )
+            try:
+                upstream = await client.send(upstream_request, stream=True)
+            except httpx.HTTPError:
+                await client.aclose()
+                telemetry.note_error("upstream_unreachable")
+                raise HTTPException(status_code=502, detail="OpenAI Responses request failed.")
+            telemetry.note_upstream_status(upstream.status_code, getattr(upstream, "headers", None))
+
+            if upstream.status_code >= 400:
+                status_code = upstream.status_code
                 try:
-                    upstream_error = json.loads(content)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    upstream_error = {}
-                error = upstream_error.get("error", {}) if isinstance(upstream_error, dict) else {}
-                safe_error = {"message": "OpenAI Responses request was rejected."}
-                for field in ("type", "code"):
-                    value = error.get(field) if isinstance(error, dict) else None
-                    if isinstance(value, str) and value.isascii() and value.replace("_", "").isalnum() and len(value) <= 64:
-                        safe_error[field] = value
+                    content = await upstream.aread()
+                    try:
+                        upstream_error = json.loads(content)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        upstream_error = {}
+                    error = upstream_error.get("error", {}) if isinstance(upstream_error, dict) else {}
+                    safe_error = {"message": "OpenAI Responses request was rejected."}
+                    for field in ("type", "code"):
+                        value = error.get(field) if isinstance(error, dict) else None
+                        if isinstance(value, str) and value.isascii() and value.replace("_", "").isalnum() and len(value) <= 64:
+                            safe_error[field] = value
+                    telemetry.note_error_body(content)
+                finally:
+                    await upstream.aclose()
+                    await client.aclose()
+                return JSONResponse(status_code=status_code, content={"error": safe_error})
+
+            async def stream() -> AsyncIterator[bytes]:
+                try:
+                    async for chunk in upstream.aiter_bytes():
+                        telemetry.observe_chunk(chunk)
+                        yield chunk
+                finally:
+                    try:
+                        await upstream.aclose()
+                        await client.aclose()
+                    finally:
+                        telemetry.finish()
+
+            # SIWC is requested as an upstream SSE stream; restore the caller's
+            # requested response mode at this OpenAI-compatible boundary.
+            if stream_requested:
+                stream_issued = True
+                return StreamingResponse(stream(), status_code=upstream.status_code, media_type="text/event-stream")
+
+            try:
+                try:
+                    response = await read_non_streaming_response(upstream, telemetry)
+                except httpx.HTTPError as exc:
+                    raise HTTPException(status_code=502, detail="OpenAI Responses request failed.") from exc
+                return JSONResponse(status_code=upstream.status_code, content=response)
             finally:
                 await upstream.aclose()
                 await client.aclose()
-            return JSONResponse(status_code=status_code, content={"error": safe_error})
-
-        async def stream() -> AsyncIterator[bytes]:
-            try:
-                async for chunk in upstream.aiter_bytes():
-                    yield chunk
-            finally:
-                await upstream.aclose()
-                await client.aclose()
-
-        # SIWC is requested as an upstream SSE stream; restore the caller's
-        # requested response mode at this OpenAI-compatible boundary.
-        if stream_requested:
-            return StreamingResponse(stream(), status_code=upstream.status_code, media_type="text/event-stream")
-
-        try:
-            try:
-                response = await read_non_streaming_response(upstream)
-            except httpx.HTTPError as exc:
-                raise HTTPException(status_code=502, detail="OpenAI Responses request failed.") from exc
-            return JSONResponse(status_code=upstream.status_code, content=response)
         finally:
-            await upstream.aclose()
-            await client.aclose()
+            if not stream_issued:
+                # The streaming path emits when the relayed body finishes.
+                telemetry.finish()
 
     application.include_router(connect_router(models))
     return application

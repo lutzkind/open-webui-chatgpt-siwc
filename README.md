@@ -102,6 +102,21 @@ Open WebUI v0.12.0 and newer provide the canonical reasoning selector as native 
 
 The earlier stock Open WebUI Filter Function at [`integrations/open-webui/functions/siwc_think.py`](integrations/open-webui/functions/siwc_think.py) is **retired** and superseded by the native Model Controls. It remains in the repository only for older Open WebUI versions (pre-v0.12.0) that do not have Model Controls; do not run it alongside native Model Controls. See the integration [notes](integrations/open-webui/README.md).
 
+## Prompt caching, tool loops and plan usage
+
+SIWC plan usage has no stored conversation state: every request resends the full `input`, and each round of a client-side tool loop (model → tools → model) is a separate `/v1/responses` call billed at full size. Two adapter behaviors reduce that drain without changing what the model sees:
+
+- **Conversation cache routing (`CACHE_ROUTING_KEY`).** When a caller does not send `prompt_cache_key`, the adapter derives one from the conversation anchor (model plus first input item) and sends it. Every tool-loop continuation of one visible conversation therefore carries the same routing key, so the upstream cache can be reused for the unchanged prefix instead of re-billing it as fresh input. The key is an opaque digest; it carries no readable conversation content, does not alter the model-visible input, and is never sent when the caller provides its own. `prompt_cache_retention` and `previous_response_id` remain intentionally absent: the SIWC preview [rejects](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations) the former and requires HTTP requests to omit the latter.
+- **Append-only request construction.** Request serialization is deterministic (stable tool ordering, canonical hashing only in telemetry), so consecutive tool rounds share a byte-identical prefix and differ only by appended items.
+
+Round-trip count itself is controlled by the model and Open WebUI: each assistant tool-call batch costs one model turn, parallel calls inside one batch are executed together, and the adapter performs exactly one upstream request per inbound request (no retries, no replay). High reasoning effort remains available through the Model Controls; nothing in the adapter lowers it.
+
+## Request telemetry
+
+The adapter writes one structured, content-free JSON log line per `/v1/responses` request to stdout (`docker compose logs siwc-adapter`, logger `siwc.telemetry`, disable with `REQUEST_TELEMETRY=false`). Each line includes the locally generated request ID, model, reasoning effort, input item count and byte sizes, tool-definition count/bytes, per-item structural fingerprints (length plus truncated SHA-256), the stable-prefix hash, byte accounting by category (messages, function calls, tool results, reasoning), a comparison with the previous/best-matching recent request (common prefix items/bytes, first difference position, strict-extension flag), upstream status, duration, response ID, token usage including cached and cache-write counters, and non-secret rate-limit headers.
+
+Telemetry never logs prompts, assistant content, tool arguments or results, credentials, or headers that can carry secrets. Two installs answered by the same process keep at most the last 32 request fingerprints in memory for prefix comparison; the buffer resets on restart.
+
 ## Credential storage and security
 
 The adapter encrypts the SIWC credential record with Fernet and atomically stores it in `DATA_DIR/credentials.enc` with restrictive file permissions. The encryption key is supplied separately through `SIWC_CREDENTIAL_KEY`. Refresh-token rotation is persisted back to the encrypted file. The local companion does not retain a plaintext credential file.
