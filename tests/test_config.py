@@ -66,6 +66,25 @@ def test_legacy_environment_names_remain_supported(monkeypatch, tmp_path):
     assert settings.OPENAI_API_BASE_URL == "https://api.openai.com/v1"
 
 
+def test_websocket_transport_settings_default_to_http_and_are_validated():
+    settings = valid_settings()
+    assert settings.RESPONSES_TRANSPORT == "http"
+    assert settings.WS_CONVERSATION_HEADER == "X-OpenWebUI-Chat-Id"
+    assert settings.WS_CONNECTION_MAX_AGE_SECONDS < 3600
+    assert settings.WS_EVENT_TIMEOUT_SECONDS > 0
+    assert settings.WS_LANE_IDLE_TTL_SECONDS > 0
+
+    websocket = valid_settings(RESPONSES_TRANSPORT="websocket")
+    assert websocket.RESPONSES_TRANSPORT == "websocket"
+
+    with pytest.raises(ValidationError):
+        valid_settings(RESPONSES_TRANSPORT="quic")
+    with pytest.raises(ValidationError, match="valid HTTP header name"):
+        valid_settings(WS_CONVERSATION_HEADER="not a header")
+    with pytest.raises(ValidationError, match="positive numbers of seconds"):
+        valid_settings(WS_EVENT_TIMEOUT_SECONDS=0)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

@@ -152,6 +152,10 @@ class RequestFingerprint:
     def item_count(self) -> int:
         return len(self.items)
 
+    @property
+    def item_hashes(self) -> tuple[str, ...]:
+        return tuple(item.sha16 for item in self.items)
+
     def exact_kind_bytes(self, *kinds: str) -> int:
         return sum(item.size_bytes for item in self.items if item.kind in kinds)
 
@@ -394,6 +398,7 @@ class RequestTelemetry:
         self.rate_limit: dict[str, str] = {}
         self.stream_requested: bool | None = None
         self.error: str | None = None
+        self.transport: dict[str, Any] = {"kind": "http"}
         self._finished = False
 
     def note_stream_requested(self, requested: bool) -> None:
@@ -416,6 +421,25 @@ class RequestTelemetry:
 
     def observe_line(self, line: str | bytes) -> None:
         self.observer.observe_line(line)
+
+    def observe_event(self, event: dict) -> None:
+        """Feed an already-parsed upstream event (WebSocket transport)."""
+        if isinstance(event, dict):
+            self.observer._observe_event(event)
+
+    def note_transport(self, report: dict) -> None:
+        """Attach the WebSocket transport comparison record."""
+        safe: dict[str, Any] = {}
+        for key, value in report.items():
+            if key.startswith("_"):
+                continue
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                safe[key] = value
+        received = safe.get("received_bytes")
+        sent = safe.get("sent_bytes")
+        if isinstance(received, int) and isinstance(sent, int) and received > 0:
+            safe["wire_reduction"] = round(1 - (sent / received), 4)
+        self.transport = safe
 
     def note_error(self, error: str) -> None:
         # Local (adapter-side) failure label only; never upstream content.
@@ -475,6 +499,7 @@ class RequestTelemetry:
             },
             "cache_routing": self.cache_key_source,
             "cache_breakpoints": self.cache_breakpoints,
+            "transport": self.transport,
             "upstream_dispatched": self.upstream_dispatched,
             "upstream_status": self.upstream_status,
             "duration_ms": round((time.monotonic() - self.started) * 1000, 1),

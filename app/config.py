@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
@@ -75,6 +76,29 @@ class Settings(BaseSettings):
     )
     TOKEN_REFRESH_SKEW_SECONDS: int = 300
     REQUEST_TIMEOUT_SECONDS: float = 120.0
+    # Transport for upstream Responses requests: `http` keeps one independent
+    # HTTP/SSE call per inbound request; `websocket` reuses one persistent
+    # authenticated Responses WebSocket per account and continues tool-loop
+    # rounds with `previous_response_id` plus only the new input items. The
+    # HTTP path remains the bounded fallback when the socket cannot be used.
+    RESPONSES_TRANSPORT: Literal["http", "websocket"] = "http"
+    # Header that carries an explicit Open WebUI conversation identifier
+    # (for example Open WebUI's `X-OpenWebUI-Chat-Id`). When absent, lanes are
+    # correlated by proven strict-extension matching instead.
+    WS_CONVERSATION_HEADER: str = "X-OpenWebUI-Chat-Id"
+    # Bounded socket lifecycle. The service closes connections at 60 minutes;
+    # rotate earlier so requests never race the server-side limit.
+    WS_CONNECTION_MAX_AGE_SECONDS: float = 3300.0
+    # Gap allowed between WebSocket events; long generations are bounded by
+    # the protocol ping, not by a total response deadline.
+    WS_EVENT_TIMEOUT_SECONDS: float = 600.0
+    WS_OPEN_TIMEOUT_SECONDS: float = 30.0
+    # Wait bound for the single per-connection lane: when a long generation is
+    # already in flight the waiting request falls back to HTTP instead of
+    # blocking indefinitely.
+    WS_LOCK_TIMEOUT_SECONDS: float = 180.0
+    # A lane whose last request is older than this is not continued.
+    WS_LANE_IDLE_TTL_SECONDS: float = 900.0
     # Structured content-free request telemetry (see app/telemetry.py).
     REQUEST_TELEMETRY: bool = True
     # Explicit prompt-cache breakpoints (see app/caching.py): mark the stable
@@ -160,6 +184,26 @@ class Settings(BaseSettings):
     def validate_identity_header(cls, value: str) -> str:
         if not _HEADER_PATTERN.fullmatch(value):
             raise ValueError("TRUSTED_EMAIL_HEADER must be a valid HTTP header name.")
+        return value
+
+    @field_validator("WS_CONVERSATION_HEADER")
+    @classmethod
+    def validate_conversation_header(cls, value: str) -> str:
+        if not _HEADER_PATTERN.fullmatch(value):
+            raise ValueError("WS_CONVERSATION_HEADER must be a valid HTTP header name.")
+        return value
+
+    @field_validator(
+        "WS_CONNECTION_MAX_AGE_SECONDS",
+        "WS_EVENT_TIMEOUT_SECONDS",
+        "WS_OPEN_TIMEOUT_SECONDS",
+        "WS_LOCK_TIMEOUT_SECONDS",
+        "WS_LANE_IDLE_TTL_SECONDS",
+    )
+    @classmethod
+    def validate_positive_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("WebSocket timings must be positive numbers of seconds.")
         return value
 
     @field_validator("OPENAI_API_BASE_URL")
