@@ -589,70 +589,74 @@ class WebSocketTransport:
         report: dict[str, Any],
     ) -> WsSession:
         connection = await self.connection()
-        now = time.monotonic()
-        generation = connection.generation
-        key = conversation_key
-        lane: LaneState | None = None
-        if key is not None:
-            lane = self.lanes.get(key)
-        else:
-            key, lane = self._find_lane_by_extension(
-                connection, fingerprint=fingerprint, generation=generation, now=now
-            )
-        plan = plan_continuation(
-            current_items=body["input"],
-            item_hashes=fingerprint.item_hashes,
-            model=fingerprint.model,
-            instructions_sha=fingerprint.instructions_sha16,
-            tools_sha=fingerprint.tools_sha16,
-            lane=lane,
-            generation=generation,
-            now=now,
-            idle_ttl=self.settings.WS_LANE_IDLE_TTL_SECONDS,
-            instructions_present=bool(body.get("instructions")),
-        )
-        report.update(
-            {
-                "kind": "websocket",
-                "lane": key,
-                "generation": generation,
-                "mode": plan.mode,
-                "continuation": plan.is_continuation,
-                "previous_response_used": plan.is_continuation,
-                "previous_response_id": plan.previous_response_id,
-                "sent_items": plan.sent_item_count,
-                "sent_bytes": plan.sent_bytes,
-                "sent_tool_bytes": plan.sent_tool_bytes,
-                "received_items": fingerprint.item_count,
-                "received_bytes": fingerprint.input_bytes,
-                "received_tool_bytes": fingerprint.exact_kind_bytes("function_call_output"),
-                "stripped_items": plan.stripped_items,
-                "fallback_reason": None if plan.is_continuation else plan.reason,
-                "reconnects": 0,
-            }
-        )
         try:
             await asyncio.wait_for(
                 connection.lock.acquire(), timeout=self.settings.WS_LOCK_TIMEOUT_SECONDS
             )
         except (asyncio.TimeoutError, TimeoutError):
             raise WsUnavailable("websocket_busy") from None
-        session = WsSession(
-            self,
-            connection,
-            conversation_key=key,
-            body=body,
-            plan=plan,
-            item_hashes=fingerprint.item_hashes,
-            model=fingerprint.model,
-            instructions_sha=fingerprint.instructions_sha16,
-            tools_sha=fingerprint.tools_sha16,
-            report=report,
-        )
         try:
+            # The plan is computed while holding the connection lock so a
+            # queued request is planned against the lane state left by the
+            # request that just finished, never against a stale snapshot.
+            now = time.monotonic()
+            generation = connection.generation
+            key = conversation_key
+            lane: LaneState | None = None
+            if key is not None:
+                lane = self.lanes.get(key)
+            else:
+                key, lane = self._find_lane_by_extension(
+                    connection, fingerprint=fingerprint, generation=generation, now=now
+                )
+            plan = plan_continuation(
+                current_items=body["input"],
+                item_hashes=fingerprint.item_hashes,
+                model=fingerprint.model,
+                instructions_sha=fingerprint.instructions_sha16,
+                tools_sha=fingerprint.tools_sha16,
+                lane=lane,
+                generation=generation,
+                now=now,
+                idle_ttl=self.settings.WS_LANE_IDLE_TTL_SECONDS,
+                instructions_present=bool(body.get("instructions")),
+            )
+            report.update(
+                {
+                    "kind": "websocket",
+                    "lane": key,
+                    "generation": generation,
+                    "mode": plan.mode,
+                    "continuation": plan.is_continuation,
+                    "previous_response_used": plan.is_continuation,
+                    "previous_response_id": plan.previous_response_id,
+                    "sent_items": plan.sent_item_count,
+                    "sent_bytes": plan.sent_bytes,
+                    "sent_tool_bytes": plan.sent_tool_bytes,
+                    "received_items": fingerprint.item_count,
+                    "received_bytes": fingerprint.input_bytes,
+                    "received_tool_bytes": fingerprint.exact_kind_bytes("function_call_output"),
+                    "stripped_items": plan.stripped_items,
+                    "fallback_reason": None if plan.is_continuation else plan.reason,
+                    "reconnects": 0,
+                }
+            )
+            session = WsSession(
+                self,
+                connection,
+                conversation_key=key,
+                body=body,
+                plan=plan,
+                item_hashes=fingerprint.item_hashes,
+                model=fingerprint.model,
+                instructions_sha=fingerprint.instructions_sha16,
+                tools_sha=fingerprint.tools_sha16,
+                report=report,
+            )
             await session.start()
         except BaseException:
-            session.release()
+            if connection.lock.locked():
+                connection.lock.release()
             raise
         return session
 

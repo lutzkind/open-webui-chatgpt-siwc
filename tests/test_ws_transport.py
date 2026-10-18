@@ -662,3 +662,47 @@ def test_lane_state_holds_no_conversation_content(tmp_path, monkeypatch):
     assert lane.response_id == "resp-1"
     assert lane.item_count == 1
     assert all(len(digest) == 16 for digest in lane.item_hashes)
+
+
+def test_queued_request_is_planned_against_the_fresh_lane_state(tmp_path, monkeypatch):
+    """A request that waits for the connection lock must not reuse a stale plan."""
+    def responder(frame, index, srv):
+        return completed_events(f"resp-{index}", [message_item("ok")])
+
+    server = FakeResponsesServer(responder)
+    server.start()
+    first_input = [message_item("one", "user")]
+    second_input = [*first_input, message_item("ok"), message_item("two", "user")]
+    third_input = [*second_input, message_item("ok"), message_item("three", "user")]
+    try:
+        async def scenario():
+            transport, _, _ = build_transport(tmp_path, server, monkeypatch)
+
+            async def run(body):
+                session = await transport.begin(
+                    body=body, conversation_key="h:test",
+                    fingerprint=RequestTelemetry(settings_like(), body, cache_key_source="disabled", recent=RecentRequests()).fingerprint,
+                    report={},
+                )
+                return [event async for event in session.stream()]
+
+            await run({"model": "gpt-6.1-sol", "store": False, "input": first_input})
+
+            # Start the second request, then queue a third one on the same
+            # conversation while the second still owns the connection lock. The
+            # queued request must be planned from the lane state the second
+            # request leaves behind, so it transmits only its newest item.
+            second = asyncio.create_task(run({"model": "gpt-6.1-sol", "store": False, "input": second_input}))
+            await asyncio.sleep(0.2)
+            third = asyncio.create_task(run({"model": "gpt-6.1-sol", "store": False, "input": third_input}))
+            await asyncio.gather(second, third)
+            await transport.aclose()
+
+        run(scenario())
+    finally:
+        server.stop()
+
+    assert len(server.frames) == 3
+    assert server.frames[1]["input"] == [message_item("two", "user")]
+    assert server.frames[2]["previous_response_id"] == "resp-1"
+    assert server.frames[2]["input"] == [message_item("three", "user")]
