@@ -115,7 +115,7 @@ Round-trip count itself is controlled by the model and Open WebUI: each assistan
 
 The adapter writes one structured, content-free JSON log line per `/v1/responses` request to stdout (`docker compose logs siwc-adapter`, logger `siwc.telemetry`, disable with `REQUEST_TELEMETRY=false`). Each line includes the locally generated request ID, model, reasoning effort, input item count and byte sizes, tool-definition count/bytes, per-item structural fingerprints (length plus truncated SHA-256), the stable-prefix hash, byte accounting by category (messages, function calls, tool results, reasoning), a comparison with the previous/best-matching recent request (common prefix items/bytes, first difference position, strict-extension flag), upstream status, duration, response ID, token usage including cached and cache-write counters, and non-secret rate-limit headers.
 
-Telemetry never logs prompts, assistant content, tool arguments or results, credentials, or headers that can carry secrets. Two installs answered by the same process keep at most the last 32 request fingerprints in memory for prefix comparison; the buffer resets on restart.
+Telemetry never logs prompts, assistant content, tool arguments or results, credentials, or headers that can carry secrets. The adapter process keeps at most the last 32 request fingerprints in memory for prefix comparison; the buffer resets on restart.
 
 ## Credential storage and security
 
