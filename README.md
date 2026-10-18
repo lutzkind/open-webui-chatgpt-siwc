@@ -20,6 +20,11 @@ OpenAI
 
 The adapter holds encrypted SIWC credentials, discovers the models available to the connected account, and forwards supported Responses API requests. It does not implement an agent framework, a model gateway, a database, or a vector store.
 
+Two upstream transports share that interface:
+
+- `RESPONSES_TRANSPORT=http` (default) relays one independent HTTP/SSE Responses request per inbound request.
+- `RESPONSES_TRANSPORT=websocket` keeps one authenticated Responses WebSocket per account and continues a conversation with `previous_response_id` plus only the new input items, falling back to the HTTP path whenever the socket cannot serve the request.
+
 ## Two separate sign-ins
 
 - **Sign into Open WebUI** with the identity provider configured by your Open WebUI administrator. This gives you access to your self-hosted Open WebUI account. An administrator identity may be required to connect or inspect the shared provider.
@@ -78,8 +83,16 @@ In Open WebUI's existing OpenAI-compatible connection settings, add one provider
 - **API key:** the same value configured as `ADAPTER_API_KEY`.
 - **API type:** Responses.
 - **Model IDs:** leave dynamic model discovery enabled; do not enter a hard-coded model list.
+- **Headers (recommended for the WebSocket transport):** add
+  `{"X-OpenWebUI-Chat-Id": "{{CHAT_ID}}"}` so every request of one conversation
+  carries the same Open WebUI chat identifier. With the header present, the
+  adapter correlates tool-loop rounds by that explicit conversation ID; without
+  it, it falls back to proving that each request is a strict extension of a
+  recent one. The raw identifier is never logged or stored — only a truncated
+  digest is used as the in-memory lane key.
 
-Use the provider once. Model discovery returns only models the connected ChatGPT account is allowed to list. Open WebUI labels can vary by release; keep the provider's API type set to Responses.
+Use the provider once. Model discovery returns only models the connected ChatGPT account is allowed to list. Open WebUI labels can vary by release; keep the provider's API type set to Responses. The adapter accepts `X-OpenWebUI-Chat-Id` by default; set `WS_CONVERSATION_HEADER` to look for a different header name.
+
 
 The connection page's **Connect ChatGPT** action downloads or opens the macOS companion. Confirm the Open WebUI address shown by the companion, then sign in at the official OpenAI authorization page. After consent, the companion sends the credentials over HTTPS to the paired adapter. Return to Open WebUI and select a discovered model.
 
@@ -90,7 +103,7 @@ The OAuth callback uses `http://127.0.0.1:<port>/auth/callback` on the computer 
 ## Responses API compatibility
 
 - The adapter queries OpenAI for the connected account's model catalog and maps visible entries to OpenAI-compatible model records. Model availability is account-specific and can change.
-- The adapter uses upstream Responses SSE with `store: false`; streaming callers receive SSE, while non-streaming callers receive the completed Responses object as JSON.
+- The adapter uses upstream Responses SSE with `store: false`; streaming callers receive SSE, while non-streaming callers receive the completed Responses object as JSON. With `RESPONSES_TRANSPORT=websocket` the same contract is preserved: the adapter translates the socket's events into the same Responses SSE stream and JSON response objects.
 - The adapter maps Open WebUI's legacy `reasoning_effort` field to Responses API `reasoning.effort` and preserves the native reasoning object where supported.
 - Native Open WebUI function tools are passed through in the Responses request. Tool execution and approvals remain controlled by Open WebUI.
 - Open WebUI system-role input items are converted to the Responses-compatible developer role. Fields outside the current SIWC plan surface are removed.
@@ -113,11 +126,83 @@ SIWC plan usage has no stored conversation state: every request resends the full
 
 Round-trip count itself is controlled by the model and Open WebUI: each assistant tool-call batch costs one model turn, parallel calls inside one batch are executed together, and the adapter performs exactly one upstream request per inbound request (no retries, no replay). High reasoning effort remains available through the Model Controls; nothing in the adapter lowers it.
 
+## WebSocket transport (`RESPONSES_TRANSPORT`)
+
+`RESPONSES_TRANSPORT=websocket` keeps one authenticated Responses WebSocket
+(`wss://api.openai.com/v1/responses`) per SIWC account and continues a
+conversation on that socket with `previous_response_id` plus only the items the
+caller appended. Open WebUI keeps its existing Responses HTTP interface; the
+browser never opens an OpenAI socket.
+
+How a conversation is continued:
+
+- The adapter maintains one in-memory *lane* per conversation plus connection
+  generation. A lane holds only derived state: the latest upstream response ID,
+  per-item digests of the last request, output-item comparison signatures, the
+  connection generation and a last-used timestamp. No prompt text, tool
+  arguments, tool results or credentials are stored, and there is no durable
+  adapter conversation store — Open WebUI remains the source of conversation
+  history.
+- The first request of a chain sends the full sanitized context. Every later
+  request is continued only when the adapter can prove it is a strict,
+  byte-stable extension of the lane's previous request: same model, same
+  instructions, same tool definitions, same connection generation, and every
+  earlier input item identical. Replayed response output items (for example the
+  `function_call` items Open WebUI stores on the assistant message) are removed
+  from the delta because they already live in the upstream conversation state.
+- Anything else — edited or reordered history, a removed item, changed
+  instructions or tools, a new conversation, an idle lane, a lost connection or
+  a rejected `previous_response_id` — falls back to a full-context request on
+  the same socket. The adapter never guesses.
+- Connections rotate before the documented 60-minute server limit; a closed,
+  expired or token-rotated socket is replaced, the next request per conversation
+  resends full context from Open WebUI's history, and continuation resumes from
+  the new chain.
+
+SIWC-specific behavior observed in live acceptance (2026-10-18) and reflected in
+the implementation:
+
+- The plan route accepts the WebSocket and same-socket `previous_response_id`
+  continuation, which HTTP does not.
+- The plan route rejects the WebSocket-only `stream_id` parameter
+  (`invalid_request_error`, "Unsupported parameter: stream_id"), so a connection
+  carries a single implicit lane. The adapter serializes requests per connection
+  and uses the bounded HTTP fallback for a request that cannot get the lane in
+  time.
+- On a continuation the route reports the retained prefix as cached input tokens
+  (`usage.input_tokens_details.cached_tokens`), which the HTTP route never did;
+  the bytes actually retransmitted drop from the full context to the appended
+  items only.
+
+Fallback behavior is deliberate and bounded: if the socket cannot be established
+(or is disabled, unauthorized, cooling down after failures, or busy), the
+request is served by the existing HTTP/SSE path and the adapter records the
+reason in telemetry. Model, quota and policy errors are never silently switched
+between transports; they are returned to the caller unchanged.
+
+Configuration: `RESPONSES_TRANSPORT=http|websocket`, `WS_CONVERSATION_HEADER`,
+`WS_CONNECTION_MAX_AGE_SECONDS`, `WS_EVENT_TIMEOUT_SECONDS`,
+`WS_OPEN_TIMEOUT_SECONDS`, `WS_LOCK_TIMEOUT_SECONDS`, `WS_LANE_IDLE_TTL_SECONDS`.
+See [.env.example](.env.example). `store: false` is preserved on every request
+over both transports.
+
+
 ## Request telemetry
 
 The adapter writes one structured, content-free JSON log line per `/v1/responses` request to stdout (`docker compose logs siwc-adapter`, logger `siwc.telemetry`, disable with `REQUEST_TELEMETRY=false`). Each line includes the locally generated request ID, model, reasoning effort, input item count and byte sizes, tool-definition count/bytes, per-item structural fingerprints (length plus truncated SHA-256), the stable-prefix hash, byte accounting by category (messages, function calls, tool results, reasoning), a comparison with the previous/best-matching recent request (common prefix items/bytes, first difference position, strict-extension flag), upstream status, duration, response ID, token usage including cached and cache-write counters, and non-secret rate-limit headers.
 
 Telemetry never logs prompts, assistant content, tool arguments or results, credentials, or headers that can carry secrets. The adapter process keeps at most the last 32 request fingerprints in memory for prefix comparison; the buffer resets on restart.
+
+Every line also carries a `transport` record so HTTP and WebSocket behavior can
+be compared numerically: `kind` (http/websocket), `lane` (opaque conversation
+digest), `generation`, `mode` (`full` or `continuation`),
+`previous_response_used`, `previous_response_id`, `sent_items`/`sent_bytes` and
+`sent_tool_bytes` (what was actually transmitted upstream),
+`received_items`/`received_bytes`/`received_tool_bytes` (what the caller sent),
+`stripped_items`, `wire_reduction`, `reconnects`, `fallback_reason`,
+`response_id`, `terminal_event` and the provider usage counters. `fallback`
+marks requests served by the HTTP path because the socket was unavailable.
+
 
 ## Credential storage and security
 
@@ -166,7 +251,10 @@ node --test tools/test_oauth_flow.test.mjs
 node tools/test_companion_flow.mjs
 ```
 
-Build the adapter image with `docker build -t open-webui-chatgpt-siwc:local .`. The macOS companion is built by the release workflow on macOS; its source and build steps are in `companion/` and `tools/`. Tests use synthetic credentials only. Live SIWC consent is a manual acceptance step and is not simulated by CI.
+WebSocket transport tests run against an in-process scripted Responses server
+(`tests/ws_fakes.py`), so the whole suite stays offline and deterministic.
+
+Build the adapter image with `docker build -t open-webui-chatgpt-siwc:local .`. The macOS companion is built by the release workflow on macOS; its source and build steps are in `companion/` and `tools/`. Tests use synthetic credentials only. Live SIWC consent is a manual acceptance step and is not simulated by CI; `tools/ws_acceptance.py` performs the bounded three-phase live acceptance (trivial response, same-conversation continuation, incremental tool result) against a running adapter.
 
 ## Contributing
 

@@ -18,6 +18,7 @@ from .telemetry import (
     RequestTelemetry,
     setup_logging,
 )
+from .ws_transport import WebSocketTransport, WsStreamError, WsUnavailable
 
 UNSUPPORTED_PLAN_FIELDS = {
     "background",
@@ -100,19 +101,13 @@ def _event_from_sse_data(data: str) -> dict | None:
     return event
 
 
-async def read_non_streaming_response(upstream: httpx.Response, telemetry: RequestTelemetry | None = None) -> dict:
+class ResponseCollector:
     """Collect a completed Response object when the caller requested JSON."""
-    data_lines: list[str] = []
-    output_items: dict[int, dict] = {}
 
-    def parse_pending() -> dict | None:
-        if not data_lines:
-            return None
-        data = "\n".join(data_lines)
-        data_lines.clear()
-        return _event_from_sse_data(data)
+    def __init__(self) -> None:
+        self.output_items: dict[int, dict] = {}
 
-    def consume_event(event: dict | None) -> dict | None:
+    def consume(self, event: dict | None) -> dict | None:
         if event is None:
             return None
 
@@ -121,7 +116,7 @@ async def read_non_streaming_response(upstream: httpx.Response, telemetry: Reque
             output_index = event.get("output_index")
             item = event.get("item")
             if isinstance(output_index, int) and output_index >= 0 and isinstance(item, dict):
-                output_items[output_index] = item
+                self.output_items[output_index] = item
 
         if event_type not in TERMINAL_RESPONSE_EVENTS:
             return None
@@ -136,11 +131,24 @@ async def read_non_streaming_response(upstream: httpx.Response, telemetry: Reque
         if not isinstance(output, list) or not output:
             # SIWC can emit completed output items in the SSE stream while its
             # terminal response object has an empty output array.
-            recovered_output = [output_items[index] for index in sorted(output_items)]
+            recovered_output = [self.output_items[index] for index in sorted(self.output_items)]
             if not recovered_output:
                 raise HTTPException(status_code=502, detail="OpenAI Responses stream completed without output.")
             response["output"] = recovered_output
         return response
+
+
+async def read_non_streaming_response(upstream: httpx.Response, telemetry: RequestTelemetry | None = None) -> dict:
+    """Collect a completed Response object when the caller requested JSON."""
+    data_lines: list[str] = []
+    collector = ResponseCollector()
+
+    def parse_pending() -> dict | None:
+        if not data_lines:
+            return None
+        data = "\n".join(data_lines)
+        data_lines.clear()
+        return _event_from_sse_data(data)
 
     async for line in upstream.aiter_lines():
         if telemetry is not None:
@@ -151,11 +159,11 @@ async def read_non_streaming_response(upstream: httpx.Response, telemetry: Reque
             data_lines.append(line[5:].lstrip())
             continue
         if not line:
-            response = consume_event(parse_pending())
+            response = collector.consume(parse_pending())
             if response is not None:
                 return response
 
-    response = consume_event(parse_pending())
+    response = collector.consume(parse_pending())
     if response is not None:
         return response
     raise HTTPException(status_code=502, detail="OpenAI Responses stream ended before completion.")
@@ -183,6 +191,66 @@ def normalize_models(payload: dict) -> dict:
     return {"object": "list", "data": data}
 
 
+def _sse_event_bytes(event: dict) -> bytes:
+    """Serialize one upstream Responses event as an SSE record.
+
+    Byte framing matches what the HTTP relay forwards from OpenAI: an
+    ``event:`` line for the type plus the single-line JSON ``data:`` payload.
+    """
+    payload = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
+    lines = []
+    event_type = event.get("type")
+    if isinstance(event_type, str) and event_type:
+        lines.append(f"event: {event_type}")
+    lines.append(f"data: {payload}")
+    return ("\n".join(lines) + "\n\n").encode("utf-8")
+
+
+def _websocket_stream_error_event() -> dict:
+    return {
+        "type": "error",
+        "status": 502,
+        "error": {
+            "type": "server_error",
+            "code": "websocket_stream_failed",
+            "message": "The upstream Responses connection closed before the response finished.",
+        },
+    }
+
+
+async def relay_websocket_stream(session, telemetry: RequestTelemetry) -> AsyncIterator[bytes]:
+    """Relay WebSocket transport events to a streaming client as SSE."""
+    try:
+        async for event in session.stream():
+            telemetry.observe_event(event)
+            yield _sse_event_bytes(event)
+    except WsStreamError:
+        telemetry.note_error("websocket_stream_failed")
+        yield _sse_event_bytes(_websocket_stream_error_event())
+    finally:
+        telemetry.note_transport(session.report)
+        telemetry.finish()
+
+
+async def collect_websocket_response(session, telemetry: RequestTelemetry) -> dict:
+    """Collect a completed Response object for a non-streaming caller."""
+    collector = ResponseCollector()
+    try:
+        async for event in session.stream():
+            telemetry.observe_event(event)
+            response = collector.consume(event)
+            if response is not None:
+                return response
+    except WsStreamError as exc:
+        telemetry.note_error("websocket_stream_failed")
+        raise HTTPException(status_code=502, detail="OpenAI Responses stream ended before completion.") from exc
+    finally:
+        telemetry.note_transport(session.report)
+    if session.error is not None:
+        raise HTTPException(status_code=session.error_status or 502, detail="OpenAI Responses request failed.")
+    raise HTTPException(status_code=502, detail="OpenAI Responses stream ended before completion.")
+
+
 def create_app(
     settings_override: Settings | None = None,
     store_override: CredentialStore | None = None,
@@ -194,12 +262,16 @@ def create_app(
         application.state.runtime_settings = runtime_settings
         application.state.credential_store = credential_store
         application.state.recent_requests = RecentRequests()
+        application.state.ws_transport = WebSocketTransport(runtime_settings, credential_store)
         setup_logging()
-        yield
+        try:
+            yield
+        finally:
+            await application.state.ws_transport.aclose()
 
     application = FastAPI(
         title="Open WebUI ChatGPT SIWC",
-        version="0.1.2",
+        version="0.2.0",
         lifespan=lifespan,
     )
 
@@ -271,6 +343,41 @@ def create_app(
         try:
             if not credential_store.is_configured():
                 raise HTTPException(status_code=503, detail="Sign in with ChatGPT to connect this adapter.")
+
+            session = None
+            if settings.RESPONSES_TRANSPORT == "websocket":
+                transport: WebSocketTransport = request.app.state.ws_transport
+                report: dict = {}
+                try:
+                    session = await transport.begin(
+                        body=body,
+                        conversation_key=transport.conversation_key(request.headers),
+                        fingerprint=telemetry.fingerprint,
+                        report=report,
+                    )
+                except WsUnavailable as exc:
+                    telemetry.note_error("websocket_unavailable")
+                    telemetry.note_transport({"kind": "websocket", "fallback": True, "fallback_reason": str(exc)})
+                    session = None
+                if session is not None:
+                    telemetry.note_transport(session.report)
+                    if session.error is not None:
+                        session.abort()
+                        telemetry.note_error("upstream_rejected")
+                        return JSONResponse(
+                            status_code=session.error_status or 502,
+                            content={"error": session.error},
+                        )
+                    if stream_requested:
+                        stream_issued = True
+                        return StreamingResponse(
+                            relay_websocket_stream(session, telemetry),
+                            status_code=200,
+                            media_type="text/event-stream",
+                        )
+                    response = await collect_websocket_response(session, telemetry)
+                    return JSONResponse(status_code=200, content=response)
+
             try:
                 token = await credential_store.access_token()
             except CredentialError as exc:
