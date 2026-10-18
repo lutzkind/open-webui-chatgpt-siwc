@@ -438,7 +438,7 @@ def test_cache_routing_key_is_generated_deterministically_for_a_conversation(mon
     conversation = [
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "audit"}]},
     ]
-    with TestClient(create_app(settings(tmp_path), StubStore())) as client:
+    with TestClient(create_app(settings(tmp_path, CACHE_ROUTING_KEY=True), StubStore())) as client:
         for extra in ([], [{"type": "function_call_output", "call_id": "c1", "output": "ok"}]):
             response = client.post(
                 "/v1/responses",
@@ -462,7 +462,7 @@ def test_cache_routing_key_differs_across_conversations_and_is_preserved_when_su
     FakeAsyncClient.sent = []
     FakeAsyncClient.send_response = FakeUpstream()
     monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
-    with TestClient(create_app(settings(tmp_path), StubStore())) as client:
+    with TestClient(create_app(settings(tmp_path, CACHE_ROUTING_KEY=True), StubStore())) as client:
         for body in (
             {"model": "gpt-6.1-sol", "input": [{"role": "user", "content": "conversation a"}], "stream": True},
             {"model": "gpt-6.1-sol", "input": [{"role": "user", "content": "conversation b"}], "stream": True},
